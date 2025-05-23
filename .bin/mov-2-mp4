@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# MOV to MP4 Converter (mov-2-mp4)
+#
+# Converts a .mov video file (QuickTime format) to an .mp4 file using ffmpeg,
+# resizing the output to a specified vertical resolution while preserving the
+# original aspect ratio.
+#
+# 🎯 Supported Output Resolutions:
+#   360p, 480p, 720p (default), 1080p, 1440p
+#
+# 🛠️ Requirements:
+#   - ffmpeg
+#   - ffprobe
+#   - bc (for floating-point math)
+#
+# 📌 Usage:
+#   mov-2-mp4 myvideo.mov
+#   mov-2-mp4 myvideo.mov 1080
+#   mov-2-mp4 -v myvideo.mov 480
+#
+# 🔄 Options:
+#   -v         Enable verbose output from ffmpeg
+#   [size]     Optional resolution height (e.g. 360, 720). Defaults to 720.
+#
+# 📂 Output:
+#   - Creates a new MP4 file in the same directory with the same base name.
+#
+# ❌ Limitations:
+#   - Only processes `.mov` files.
+#   - Skips files that are not valid QuickTime videos.
+# ------------------------------------------------------------------------------
+
+FILE=""
+SIZE=720
+VERBOSE="quiet"
+
+VALID_SIZES=("360" "480" "720" "1080" "1440")
+
+is_valid_size() {
+    local input_size=$1
+    for VALID_SIZE in "${VALID_SIZES[@]}"; do
+        if [ "$input_size" == "$VALID_SIZE" ]; then
+            return 0 # Size is valid
+        fi
+    done
+    return 1 # Size is not valid
+}
+
+get_proportional_dimensions() {
+    local input_file=$1
+    local target_height=$2
+    local width height new_width new_height
+
+    # Get the original width and height using ffprobe
+    read -r width height < <(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$input_file" | awk -Fx '{print $1, $2}')
+
+    # Calculate the new dimensions while maintaining aspect ratio
+    new_width=$(echo "scale=0; $width * $target_height / $height" | bc)
+    new_height=$target_height
+
+    # Ensure width and height are even
+    new_width=$(((new_width / 2) * 2))
+    new_height=$(((new_height / 2) * 2))
+
+    # Output the proportional dimensions
+    echo "${new_width}x${new_height}"
+}
+
+for arg in "$@"; do
+    case "$arg" in
+    *.mov | *.MOV) FILE="$arg" ;;
+    [0-9]*) SIZE="$arg" ;;
+    -v) VERBOSE="info" ;;
+    esac
+done
+
+if [ -z "$FILE" ]; then
+    echo "Error: no video file informed. Aborting."
+    exit 1
+elif [ ! -f "$FILE" ]; then
+    echo "$FILE not found. Aborting."
+    exit 1
+fi
+
+FILE_TYPE=$(file --mime-type -b "$FILE" | tr '[:upper:]' '[:lower:]')
+FILE_NAME=$(basename "$FILE")
+FILE_NAME="${FILE_NAME%.*}"
+
+if [ "$FILE_TYPE" != "video/quicktime" ]; then
+    echo "Error: Invalid file. Only .mov files are supported. Aborting."
+    exit 1
+fi
+
+if ! is_valid_size "$SIZE"; then
+    echo "Error: Invalid output resolution. Valid resolutions are 360p, 480p, 720p, or 1080p. Aborting."
+    exit 1
+fi
+
+echo "Resizing to ${SIZE}p..."
+
+SIZE_SCALE="scale=iw*${SIZE}/ih:${SIZE},scale=trunc(iw/2)*2:trunc(ih/2)*2"
+
+ffmpeg -y -hide_banner -i "$FILE" \
+    -loglevel "${VERBOSE}" \
+    -acodec aac \
+    -strict -2 \
+    -c:v libx264 \
+    -vf "${SIZE_SCALE}" \
+    -crf 20 \
+    "${FILE_NAME}.mp4"
+
+CONVERSION_STATUS=$?
+
+if [ -f "x264_lookahead.clbin" ]; then
+    rm -f "x264_lookahead.clbin"
+fi
+
+if [ $CONVERSION_STATUS -ne 0 ]; then
+    echo "Conversion failed."
+    exit 1
+fi
