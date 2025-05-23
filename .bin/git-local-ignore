@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Git Local Ignore files
+#
+# Adds one or more files or directories to the local Git exclude file:
+#   .git/info/exclude
+#
+# This is useful for ignoring files that should not be committed but also
+# should not be tracked globally via .gitignore (e.g., user-specific configs,
+# temporary files, etc.).
+#
+# 🛠️ Requirements:
+#   - Must be run from the root directory of a Git repository.
+#
+# 📌 Usage:
+#   ./git-local-ignore <file1> <file2> ...
+#
+# 📌 Example:
+#   ./git-local-ignore myconfig.local node_modules dist/
+#
+# 🚨 Behavior:
+#   - If a provided file or directory does not exist, you'll be prompted
+#     whether to add it anyway.
+#   - All valid entries are appended to .git/info/exclude
+#
+# ❌ The script will abort if:
+#   - No arguments are passed
+#   - The current directory is not the root of a Git repo
+# ------------------------------------------------------------------------------
+
+set -e
+
+GIT_EXCLUDE_FILE="./.git/info/exclude"
+
+[ "$#" -lt 1 ] && echo -e "Please give at least one argument" && exit 1
+
+[ ! -d "./.git" ] && echo -e "It seems this directory is not a root dir of a git repo. Aborting." && exit 1
+
+for file in "$@"; do
+	SKIP_FILE=false
+	if [ ! -e "${file}" ]; then
+		while true; do
+			read -p "It seems  this file/directory does not exists. Add it anyway? [Y/n]" answer
+			case "${answer}" in
+			[Nn]*)
+				SKIP_FILE=true
+				break
+				;;
+			[Yy]*) ;;
+			*) echo "Please answer yes or no." ;;
+			esac
+		done
+	fi
+
+	[ "${SKIP_FILE}" = true ] && continue
+
+	echo "${file}" >>"${GIT_EXCLUDE_FILE}"
+done
