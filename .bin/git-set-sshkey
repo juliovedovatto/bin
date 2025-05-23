@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Git SSH Key Setter (git-set-sshkey)
+#
+# This script sets a specific SSH private key for the current local Git repository
+# using the `core.sshCommand` config option. This is useful when working with
+# multiple GitHub or GitLab accounts or when different SSH keys are used per project.
+#
+# ✅ What it does:
+# - Verifies the current directory is a Git repository
+# - Optionally prompts for the SSH key name or path
+# - Resolves and validates the SSH key file
+# - Sets the SSH key using `git config core.sshCommand`
+# - Optionally replaces any existing SSH command config
+# - Validates the key by attempting a `git fetch`
+#
+# 🛠️ Requirements:
+# - Git must be installed and configured
+# - The SSH key must already exist and have appropriate permissions
+#
+# 📌 Usage:
+#   ./git-set-sshkey [ssh_key_path_or_alias]
+#
+# 🔄 Examples:
+#   ./git-set-sshkey work             # Uses ~/.ssh/id_rsa_work
+#   ./git-set-sshkey ~/.ssh/custom    # Uses an absolute path
+#   ./git-set-sshkey                  # Prompts for key name
+#
+# 📎 Notes:
+# - If no argument is provided, the script will prompt for input
+# - If the SSH key path starts with `/` or `~`, it is treated as absolute
+# - Adds `SSH_AUTH_SOCK=` to avoid agent conflicts
+# ------------------------------------------------------------------------------
+
+CURRENT_DIR=$(pwd)
+
+if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+  echo "Usage: $(basename "${0}")  [ssh_key_path]"
+  echo "Set the SSH key for the local Git repository. The key can be a alias or absolute path".
+  echo "If ssh_key_path is not provided, it will prompt for the SSH key name."
+  exit 0
+fi
+
+# Check if .git directory exists
+if [ ! -d "${CURRENT_DIR}/.git" ]; then
+  echo "Error: This directory does not contain a Git repository."
+  exit 1
+fi
+
+SSH_KEY_NAME=${1:-}
+
+if git config --local --get core.sshCommand >/dev/null; then
+  read -r -p "SSH command config already exists for this repo. Do you want to replace it? (Y/n): " REPLACE_SSH_CONFIG
+  REPLACE_SSH_CONFIG=$(echo "${REPLACE_SSH_CONFIG:-"y"}" | tr '[:upper:]' '[:lower:]')
+  if [ "${REPLACE_SSH_CONFIG}" != "y" ]; then
+    exit 0
+  fi
+fi
+
+if [ -z "${SSH_KEY_NAME}" ]; then
+  read -r -p "Enter the name of the SSH key to use for this repo (defaults to main ssh key): " SSH_KEY_NAME
+fi
+
+if [ ! -z "$SSH_KEY_NAME" ]; then
+  if [[ "$SSH_KEY_NAME" =~ ^(/|~).* ]]; then
+    SSH_KEY_FILE=$(eval echo "${SSH_KEY_NAME}")
+  else
+    SSH_KEY_FILE="$HOME/.ssh/id_rsa_$SSH_KEY_NAME"
+  fi
+
+  if [ ! -f "$SSH_KEY_FILE" ]; then
+    echo "Error: SSH key file '$SSH_KEY_FILE' not found."
+    exit 1
+  fi
+else
+  SSH_KEY_FILE="$HOME/.ssh/id_rsa"
+fi
+
+echo "Setting SSH key to ${SSH_KEY_FILE}..."
+git config --local core.sshCommand "SSH_AUTH_SOCK= ssh -T -i ${SSH_KEY_FILE} -o IdentitiesOnly=yes"
+
+echo ""
+
+if git fetch; then
+  echo "SSH key set successfully for this repo."
+else
+  echo "Error: Unable to fetch using the specified SSH key."
+  exit 1
+fi
