@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# GitHub PR Notification Unsubscriber for teams
+#
+# This script unsubscribes you from GitHub Pull Request notifications where:
+# - A specific team (e.g., ORG/TEAMNAME) was requested for review, and
+# - You are not the author of the PR, and
+# - You are not explicitly requested as a reviewer
+#
+# ✅ Requirements:
+# - The GH_TOKEN environment variable must be set with a GitHub token
+#   that includes `notifications`, `repo` and `read:org` scopes.
+# - GitHub CLI (`gh`) and `jq` packages must be installed.
+#
+# 📌 Usage:
+#   ./github-unsubscribe-team-prs myorg/team
+#
+# Example:
+#   GH_TOKEN=ghp_abc123 ./github-unsubscribe-team-prs myorg/frontend-team
+# ------------------------------------------------------------------------------
+
+if [ -z "$GH_TOKEN" ]; then
+  echo "🚨 Please set the GH_TOKEN environment variable."
+  exit 1
+fi
+
+if [ -z "$1" ]; then
+  echo "🚨 Please provide a team name as the first argument (e.g. ORG/TEAMNAME)."
+  exit 1
+fi
+
+ORG_TEAM="$1"
+MYSELF=$(gh api user --jq '.login')
+EXCLUDE_AUTHORS=("$MYSELF")
+
+EXCLUDE_AUTHORS_JSON=$(printf '%s\n' "${EXCLUDE_AUTHORS[@]}" | jq -R . | jq -s .)
+
+function unsubscribe() {
+  TEAM_NAME="$1"
+  if [ -z "$TEAM_NAME" ]; then
+    echo "🚨 No team name provided. Exiting."
+    exit 1
+  fi
+
+  echo "🔎 Fetching PRs with review requested for '$TEAM_NAME'..."
+  PR_PATHS=$(gh search prs --review-requested "$TEAM_NAME" --state open --limit 100 \
+    --json number,repository,author |
+    jq --argjson excluded "$EXCLUDE_AUTHORS_JSON" '
+      .[]
+      | select(.author.login as $login | $excluded | index($login) | not)
+      | "\(.repository.nameWithOwner)#\(.number)"
+    ')
+
+  if [ -z "$PR_PATHS" ]; then
+    echo "  ⚠️ No matching PRs found for $TEAM_NAME."
+    return 0
+  fi
+
+  while IFS="" read -r ITEM; do
+    PR_PATH=${ITEM//\"/}
+    IFS="#" read -r REPO PR_NUMBER <<<"$PR_PATH"
+
+    SUBJECT_URL="/repos/${REPO}/pulls/${PR_NUMBER}"
+
+    # SKIP IF THE USER IS ALREADY REQUESTED FOR REVIEW
+    if gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewRequests --jq '[.reviewRequests[].login] | index("'"$MYSELF"'") != null' | grep -q true; then
+      continue
+    fi
+
+    # GET THE THREAD ID FOR THE PR
+    thread_id=$(
+      gh api '/notifications?all=true' \
+        --paginate \
+        --jq '.[] | select(.subject.type == "PullRequest" and .reason == "review_requested" and .subject.url != null and (.subject.url | contains("'"$SUBJECT_URL"'"))) | .id'
+    )
+
+    if [ -z "$thread_id" ]; then
+      echo "  ⚠️ No thread ID found for $PR_PATH — maybe you're not subscribed."
+      continue
+    fi
+
+    NOTIFICATION_PATH="/notifications/threads/${thread_id}/subscription"
+
+    # SKIP IF USER IS NOT SUBSCRIBED TO THE PR
+    if ! gh api "$NOTIFICATION_PATH" >/dev/null 2>&1; then
+      continue
+    fi
+
+    gh api -X DELETE "$NOTIFICATION_PATH" >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      echo "  ❌ Failed to unsubscribe from $PR_PATH"
+      continue
+    fi
+
+    echo "✅ Unsubscribed from $PR_PATH"
+  done <<<"$PR_PATHS"
+}
+
+for i in "${!ORG_TEAM[@]}"; do
+  unsubscribe "${ORG_TEAM[$i]}"
+  if [ $? -ne 0 ]; then
+    echo "❌ Failed to unsubscribe from ${ORG_TEAM[$i]}"
+    continue
+  fi
+done
+
+echo ""
+echo "🎉 Finished unsubscribing from PR notifications."
