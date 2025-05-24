@@ -1,0 +1,154 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# github-unsubscribe-other-prs
+#
+# Unsubscribes you from GitHub pull-request notification threads when:
+#   - You are not the PR author, neither mentioned in the PR
+#   - You were not individually requested as a reviewer
+#
+# Options:
+#   PR_PATHS   (optional) newline-separated list of "owner/repo#pr_number" to exclude
+#   --cutoff   (optional) when provided, only notifications updated since script run
+#
+# ✅ Dependencies:
+#   - GitHub CLI (gh) authenticated via GH_TOKEN
+#   - jq
+#
+# 📌 Usage:
+#   github-unsubscribe-other-prs [PR_PATHS] [--cutoff]
+#
+# Example:
+#   GH_TOKEN=ghp_abc123 ./github-unsubscribe-other-prs --cutoff 2023-10-01
+# ------------------------------------------------------------------------------
+
+if [ -z "$GH_TOKEN" ]; then
+  echo "🚨 Please set the GH_TOKEN environment variable."
+  exit 1
+fi
+
+EXCLUDE_PRS=""
+CUTOFF_DATE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --cutoff)
+    CUTOFF_DATE="$2"
+    shift 2
+    ;;
+  *)
+    EXCLUDE_PRS="$1"
+    shift
+    ;;
+  esac
+done
+
+MYSELF=$(gh api user --jq '.login')
+
+unsubscribe_action() {
+  NOTIFICATION_PATH="$1"
+  if [ -z "$NOTIFICATION_PATH" ]; then
+    echo "  🚨 No notification path provided to unsubscribe_action."
+    return 1
+  fi
+
+  # Skip if not subscribed
+  if ! gh api "$NOTIFICATION_PATH" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  # Attempt unsubscribe
+  if ! gh api -X DELETE "$NOTIFICATION_PATH" >/dev/null 2>&1; then
+    echo "  ❌ Failed to unsubscribe from $NOTIFICATION_PATH"
+    return 1
+  fi
+
+  return 0
+}
+
+function is_iso_date() {
+  local ts="$1"
+
+  # Try full ISO-8601 UTC first
+  if date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" '+%Y-%m-%dT%H:%M:%SZ' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Fallback: try bare date (YYYY-MM-DD)
+  if date -j -f '%Y-%m-%d' "$ts" '+%Y-%m-%d' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+if [ -n "$CUTOFF_DATE" ]; then
+  if ! is_iso_date "$CUTOFF_DATE"; then
+    echo "🚨 Invalid date format. Please provide a valid ISO date (YYYY-MM-DD)."
+    exit 1
+  fi
+fi
+
+# Build JSON array of PR paths if provided
+PR_PATHS_JSON="[]"
+if [ -n "$EXCLUDE_PRS" ]; then
+  PR_PATHS_JSON=$(printf '%s\n' "$EXCLUDE_PRS" | jq -R . | jq -s .)
+  if ! echo "$PR_PATHS_JSON" | jq empty >/dev/null 2>&1 || [ "$(echo "$PR_PATHS_JSON" | jq -r 'type')" != "array" ]; then
+    echo "⚠️ Warning: Failed to parse PR_PATHS_JSON; defaulting to empty array"
+    PR_PATHS_JSON="[]"
+  fi
+fi
+
+echo "🔍 Fetching PR notifications..."
+[ -n "$CUTOFF_DATE" ] && echo "  🗓️ Cutoff date: $CUTOFF_DATE"
+[ -n "$EXCLUDE_PRS" ] && echo "  📋 Excluding PRs: $EXCLUDE_PRS"
+echo ""
+
+# Fetch and filter notification threads
+NOTIFICATIONS=$(gh api '/notifications?all=true' --paginate |
+  jq --argjson PR_PATHS "$PR_PATHS_JSON" --arg CUTOFF_DATE "$CUTOFF_DATE" '
+    [
+      .[]
+      | select(.subject.type=="PullRequest"
+               and .reason=="review_requested"
+               and (.subject.url//"")!="")
+      | (.subject.url
+          | capture("repos/(?<repo>[^/]+/[^/]+)/pulls/(?<number>\\d+)")
+          | "\(.repo)#\(.number)"
+        ) as $P
+      | select(($PR_PATHS|length==0) or ($PR_PATHS|index($P)|not))
+      | select(($CUTOFF_DATE=="" or .updated_at >= $CUTOFF_DATE))
+      | {id, url: .subject.url, updated_at}
+    ]')
+
+# Validate notifications JSON
+if [ -z "$NOTIFICATIONS" ] || ! echo "$NOTIFICATIONS" | jq empty >/dev/null 2>&1 || [ "$(echo "$NOTIFICATIONS" | jq 'length')" -eq 0 ]; then
+  echo "  ⚠️ No (valid) notifications to process"
+  exit 0
+fi
+
+echo "  👀 Found $(echo "$NOTIFICATIONS" | jq 'length') notifications to process"
+
+# Iterate and unsubscribe
+echo "$NOTIFICATIONS" | jq -c '.[]' | while read -r ITEM; do
+  THREAD_ID=$(echo "$ITEM" | jq -r '.id')
+  URL=$(echo "$ITEM" | jq -r '.url')
+
+  REPO_AND_REST=${URL#*repos/}
+  REPO=${REPO_AND_REST%%/pulls/*}
+  PR_NUMBER=${URL##*/}
+
+  # Skip if you are individually requested
+  if gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewRequests --jq '[.reviewRequests[].login] | index("'"${MYSELF}"'") != null' | grep -q true; then
+    echo "  ⚠️ Skipping ${REPO}/${PR_NUMBER} — you are already requested for review"
+    continue
+  fi
+
+  NOTIFICATION_PATH="/notifications/threads/$THREAD_ID/subscription"
+  if unsubscribe_action "$NOTIFICATION_PATH"; then
+    echo "  ✅ Unsubscribed from $REPO/$PR_NUMBER"
+  fi
+done
+
+echo ""
+echo "🎉 Finished unsubscribing from PR notifications."
