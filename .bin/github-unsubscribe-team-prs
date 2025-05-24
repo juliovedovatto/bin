@@ -46,11 +46,11 @@ function unsubscribe() {
   echo "🔎 Fetching PRs with review requested for '$TEAM_NAME'..."
   PR_PATHS=$(gh search prs --review-requested "$TEAM_NAME" --state open --limit 100 \
     --json number,repository,author |
-    jq --argjson excluded "$EXCLUDE_AUTHORS_JSON" '
-      .[]
-      | select(.author.login as $login | $excluded | index($login) | not)
-      | "\(.repository.nameWithOwner)#\(.number)"
-    ')
+    jq -r --argjson excluded "$EXCLUDE_AUTHORS_JSON" '
+    .[]
+    | select(.author.login as $login | $excluded | index($login) | not)
+    | "\(.repository.nameWithOwner)#\(.number)"
+  ')
 
   if [ -z "$PR_PATHS" ]; then
     echo "  ⚠️ No matching PRs found for $TEAM_NAME."
@@ -81,29 +81,36 @@ function unsubscribe() {
     fi
 
     NOTIFICATION_PATH="/notifications/threads/${thread_id}/subscription"
-
-    # SKIP IF USER IS NOT SUBSCRIBED TO THE PR
-    if ! gh api "$NOTIFICATION_PATH" >/dev/null 2>&1; then
-      continue
+    if unsubscribe_action "$NOTIFICATION_PATH"; then
+      echo "✅ Unsubscribed from $PR_PATH"
     fi
 
-    gh api -X DELETE "$NOTIFICATION_PATH" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      echo "  ❌ Failed to unsubscribe from $PR_PATH"
-      continue
-    fi
-
-    echo "✅ Unsubscribed from $PR_PATH"
   done <<<"$PR_PATHS"
 }
 
-for i in "${!ORG_TEAM[@]}"; do
-  unsubscribe "${ORG_TEAM[$i]}"
-  if [ $? -ne 0 ]; then
-    echo "❌ Failed to unsubscribe from ${ORG_TEAM[$i]}"
-    continue
+function unsubscribe_action() {
+  if [ -z "$1" ]; then
+    echo "🚨 No notification path provided. Exiting."
+    return 1
   fi
-done
+
+  NOTIFICATION_PATH="$1"
+
+  # SKIP IF USER IS NOT SUBSCRIBED TO THE PR
+  if ! gh api "$NOTIFICATION_PATH" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  gh api -X DELETE "$NOTIFICATION_PATH" >/dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    echo "  ❌ Failed to unsubscribe from $PR_PATH"
+    return 1
+  fi
+
+  return 0
+}
+
+unsubscribe "${ORG_TEAM}"
 
 echo ""
 echo "🎉 Finished unsubscribing from PR notifications."
